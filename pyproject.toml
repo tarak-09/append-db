@@ -1,0 +1,19 @@
+[project]
+name = "pycask"
+version = "0.1.0"
+description = "Embedded key-value database implementing an append-only log with an in-memory index."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+pycask = "pycask.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
