@@ -1,6 +1,8 @@
 import os
 import shutil
 import tempfile
+import threading
+import time
 import pytest
 from pycask import PyCask, PyCaskError
 
@@ -80,3 +82,30 @@ def test_type_errors(temp_dir):
             db.get("string_key")
         with pytest.raises(TypeError):
             db.delete("string_key")
+
+def test_concurrent_compaction(temp_dir):
+    with PyCask(temp_dir, max_file_size=500) as db:
+        # Write some data to force multiple files
+        for i in range(50):
+            db.set(f"key_{i}".encode(), b"value")
+            
+        def compact_worker():
+            db.compact()
+            
+        # Start compaction in a background thread
+        t = threading.Thread(target=compact_worker)
+        t.start()
+        
+        # Concurrently write and update data while compaction is running
+        for i in range(50, 100):
+            db.set(f"key_{i}".encode(), b"value_new")
+            
+        # Update a key that is in the old files being compacted
+        db.set(b"key_0", b"value_updated")
+        
+        t.join()
+        
+        # Verify both old compacted data and new concurrent writes exist correctly
+        assert db.get(b"key_1") == b"value"
+        assert db.get(b"key_0") == b"value_updated"
+        assert db.get(b"key_99") == b"value_new"

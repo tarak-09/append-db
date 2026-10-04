@@ -183,42 +183,65 @@ class PyCask:
             if not files_to_compact:
                 return
                 
-            compact_dir = os.path.join(self.directory, 'compact')
-            if not os.path.exists(compact_dir):
-                os.makedirs(compact_dir)
-                
-            compact_file_id = int(time.time() * 1000000)
-            compact_path = os.path.join(compact_dir, f"{compact_file_id}.data")
+            # Snapshot valid entries that reside in the files being compacted
+            valid_entries = {}
+            for key, entry in self.keydir.items():
+                if entry[0] in [f[0] for f in files_to_compact]:
+                    valid_entries[key] = entry
+                    
+        compact_dir = os.path.join(self.directory, 'compact')
+        if not os.path.exists(compact_dir):
+            os.makedirs(compact_dir)
             
-            compact_file = open(compact_path, 'ab')
-            compact_size = 0
-            
-            new_keydir_entries = {}
-            
-            for key, (file_id, vsz, value_pos, ts) in self.keydir.items():
-                if file_id in [f[0] for f in files_to_compact]:
-                    old_path = os.path.join(self.directory, f"{file_id}.data")
-                    with open(old_path, 'rb') as f:
-                        f.seek(value_pos)
-                        value = f.read(vsz)
+        compact_file_id = int(time.time() * 1000000)
+        compact_path = os.path.join(compact_dir, f"{compact_file_id}.data")
+        
+        compact_file = open(compact_path, 'ab')
+        compact_size = 0
+        
+        new_keydir_entries = {}
+        
+        for file_id, path in files_to_compact:
+            with open(path, 'rb') as f:
+                while True:
+                    header_bytes = f.read(HEADER_SIZE)
+                    if not header_bytes or len(header_bytes) < HEADER_SIZE:
+                        break
                         
-                    record_bytes, new_ts = self._encode_record(key, value, FLAG_NORMAL)
-                    new_value_pos = compact_size + HEADER_SIZE + len(key)
-                    compact_file.write(record_bytes)
-                    compact_size += len(record_bytes)
+                    crc, ts, ksz, vsz, flags = struct.unpack(HEADER_FMT, header_bytes)
                     
-                    new_keydir_entries[key] = (compact_file_id, vsz, new_value_pos, new_ts)
+                    key = f.read(ksz)
+                    if len(key) < ksz:
+                        break
+                        
+                    value_pos = f.tell()
+                    value = f.read(vsz)
                     
-            compact_file.close()
-            
-            final_compact_path = os.path.join(self.directory, f"{compact_file_id}.data")
-            os.rename(compact_path, final_compact_path)
-            
+                    if key in valid_entries:
+                        entry = valid_entries[key]
+                        if entry[0] == file_id and entry[2] == value_pos:
+                            record_bytes, new_ts = self._encode_record(key, value, FLAG_NORMAL)
+                            new_value_pos = compact_size + HEADER_SIZE + len(key)
+                            compact_file.write(record_bytes)
+                            compact_size += len(record_bytes)
+                            
+                            new_keydir_entries[key] = (compact_file_id, vsz, new_value_pos, new_ts, file_id, value_pos)
+                            
+        compact_file.close()
+        
+        final_compact_path = os.path.join(self.directory, f"{compact_file_id}.data")
+        os.rename(compact_path, final_compact_path)
+        
+        with self.lock:
+            for key, (new_file_id, vsz, new_pos, new_ts, old_file_id, old_pos) in new_keydir_entries.items():
+                if key in self.keydir:
+                    current_entry = self.keydir[key]
+                    if current_entry[0] == old_file_id and current_entry[2] == old_pos:
+                        self.keydir[key] = (new_file_id, vsz, new_pos, new_ts)
+                        
             for file_id, path in files_to_compact:
-                os.remove(path)
-                
-            for key, entry in new_keydir_entries.items():
-                self.keydir[key] = entry
+                if os.path.exists(path):
+                    os.remove(path)
                 
     def close(self):
         with self.lock:
