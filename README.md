@@ -11,6 +11,7 @@ Sometimes you need a simple, fast embedded database without the overhead of sett
 - **O(1) Reads:** Every read requires at most one disk seek.
 - **High Write Throughput:** Writes are purely append-only operations.
 - **Crash Resilience:** Index is built entirely from data files on startup.
+- **Fast Startup (Hint Files):** Compaction generates hint files containing only keys and metadata. Startup scans these lightweight hint files instead of full data files, significantly reducing load time.
 - **Non-blocking Compaction:** Merge and reclaim space from deleted or overwritten keys concurrently, without blocking reads and writes.
 - **Simple CLI:** Provides a basic command-line interface for interaction.
 

@@ -9,6 +9,9 @@ from typing import Optional
 HEADER_FMT = '<IQHIB'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
+HINT_HEADER_FMT = '<QHIQ'
+HINT_HEADER_SIZE = struct.calcsize(HINT_HEADER_FMT)
+
 FLAG_NORMAL = 0
 FLAG_TOMBSTONE = 1
 
@@ -50,29 +53,45 @@ class PyCask:
         data_files = self._get_data_files()
         
         for file_id, path in data_files:
-            with open(path, 'rb') as f:
-                while True:
-                    header_bytes = f.read(HEADER_SIZE)
-                    if not header_bytes or len(header_bytes) < HEADER_SIZE:
-                        break
+            hint_path = os.path.join(self.directory, f"{file_id}.hint")
+            if os.path.exists(hint_path):
+                with open(hint_path, 'rb') as f:
+                    while True:
+                        header_bytes = f.read(HINT_HEADER_SIZE)
+                        if not header_bytes or len(header_bytes) < HINT_HEADER_SIZE:
+                            break
+                            
+                        ts, ksz, vsz, value_pos = struct.unpack(HINT_HEADER_FMT, header_bytes)
                         
-                    crc, ts, ksz, vsz, flags = struct.unpack(HEADER_FMT, header_bytes)
-                    
-                    key = f.read(ksz)
-                    if len(key) < ksz:
-                        break
-                        
-                    value_pos = f.tell()
-                    
-                    # Verify CRC if needed, skipping for performance during load
-                    # Seek past the value
-                    f.seek(vsz, os.SEEK_CUR)
-                    
-                    if flags == FLAG_TOMBSTONE:
-                        if key in self.keydir:
-                            del self.keydir[key]
-                    else:
+                        key = f.read(ksz)
+                        if len(key) < ksz:
+                            break
+                            
                         self.keydir[key] = (file_id, vsz, value_pos, ts)
+            else:
+                with open(path, 'rb') as f:
+                    while True:
+                        header_bytes = f.read(HEADER_SIZE)
+                        if not header_bytes or len(header_bytes) < HEADER_SIZE:
+                            break
+                            
+                        crc, ts, ksz, vsz, flags = struct.unpack(HEADER_FMT, header_bytes)
+                        
+                        key = f.read(ksz)
+                        if len(key) < ksz:
+                            break
+                            
+                        value_pos = f.tell()
+                        
+                        # Verify CRC if needed, skipping for performance during load
+                        # Seek past the value
+                        f.seek(vsz, os.SEEK_CUR)
+                        
+                        if flags == FLAG_TOMBSTONE:
+                            if key in self.keydir:
+                                del self.keydir[key]
+                        else:
+                            self.keydir[key] = (file_id, vsz, value_pos, ts)
                         
         if data_files:
             last_file_id, last_path = data_files[-1]
@@ -195,8 +214,10 @@ class PyCask:
             
         compact_file_id = int(time.time() * 1000000)
         compact_path = os.path.join(compact_dir, f"{compact_file_id}.data")
+        hint_path = os.path.join(compact_dir, f"{compact_file_id}.hint")
         
         compact_file = open(compact_path, 'ab')
+        hint_file = open(hint_path, 'ab')
         compact_size = 0
         
         new_keydir_entries = {}
@@ -225,12 +246,18 @@ class PyCask:
                             compact_file.write(record_bytes)
                             compact_size += len(record_bytes)
                             
+                            hint_header = struct.pack(HINT_HEADER_FMT, new_ts, ksz, vsz, new_value_pos)
+                            hint_file.write(hint_header + key)
+                            
                             new_keydir_entries[key] = (compact_file_id, vsz, new_value_pos, new_ts, file_id, value_pos)
                             
         compact_file.close()
+        hint_file.close()
         
         final_compact_path = os.path.join(self.directory, f"{compact_file_id}.data")
+        final_hint_path = os.path.join(self.directory, f"{compact_file_id}.hint")
         os.rename(compact_path, final_compact_path)
+        os.rename(hint_path, final_hint_path)
         
         with self.lock:
             for key, (new_file_id, vsz, new_pos, new_ts, old_file_id, old_pos) in new_keydir_entries.items():
@@ -242,6 +269,9 @@ class PyCask:
             for file_id, path in files_to_compact:
                 if os.path.exists(path):
                     os.remove(path)
+                old_hint_path = os.path.join(self.directory, f"{file_id}.hint")
+                if os.path.exists(old_hint_path):
+                    os.remove(old_hint_path)
                 
     def close(self):
         with self.lock:

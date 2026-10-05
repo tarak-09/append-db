@@ -109,3 +109,20 @@ def test_concurrent_compaction(temp_dir):
         assert db.get(b"key_1") == b"value"
         assert db.get(b"key_0") == b"value_updated"
         assert db.get(b"key_99") == b"value_new"
+
+def test_hint_files(temp_dir):
+    with PyCask(temp_dir, max_file_size=200) as db:
+        db.set(b"key1", b"value1")
+        db.set(b"key2", b"value2")
+        db.set(b"key_large", b"l" * 300)
+        
+        db.compact()
+        
+    files = os.listdir(temp_dir)
+    hint_files = [f for f in files if f.endswith('.hint')]
+    assert len(hint_files) == 1
+    
+    # Reload and check (it should use the hint file)
+    with PyCask(temp_dir) as db:
+        assert db.get(b"key1") == b"value1"
+        assert db.get(b"key2") == b"value2"
