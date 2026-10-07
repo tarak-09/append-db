@@ -14,6 +14,7 @@ HINT_HEADER_SIZE = struct.calcsize(HINT_HEADER_FMT)
 
 FLAG_NORMAL = 0
 FLAG_TOMBSTONE = 1
+FLAG_COMPRESSED = 2
 
 class PyCaskError(Exception):
     pass
@@ -119,6 +120,13 @@ class PyCask:
         
     def _encode_record(self, key: bytes, value: bytes, flags: int = FLAG_NORMAL):
         ts = int(time.time() * 1000000)
+        
+        if flags == FLAG_NORMAL and len(value) > 0:
+            compressed_value = zlib.compress(value)
+            if len(compressed_value) < len(value):
+                value = compressed_value
+                flags = FLAG_COMPRESSED
+                
         ksz = len(key)
         vsz = len(value)
         
@@ -147,7 +155,8 @@ class PyCask:
             self.active_file.write(record_bytes)
             self.active_file.flush()
             
-            self.keydir[key] = (self.active_file_id, len(value), value_pos, ts)
+            actual_vsz = len(record_bytes) - HEADER_SIZE - len(key)
+            self.keydir[key] = (self.active_file_id, actual_vsz, value_pos, ts)
             self.active_file_size += record_size
             
     def get(self, key: bytes) -> Optional[bytes]:
@@ -165,12 +174,22 @@ class PyCask:
                 raise PyCaskError(f"Data file {file_id}.data not found")
                 
             with open(path, 'rb') as f:
+                header_pos = value_pos - len(key) - HEADER_SIZE
+                f.seek(header_pos)
+                header_bytes = f.read(HEADER_SIZE)
+                if len(header_bytes) != HEADER_SIZE:
+                    raise PyCaskError("Incomplete read of header")
+                _, _, _, _, flags = struct.unpack(HEADER_FMT, header_bytes)
+                
                 f.seek(value_pos)
                 value = f.read(vsz)
                 
                 # Check consistency
                 if len(value) != vsz:
                     raise PyCaskError("Incomplete read from data file")
+                    
+                if flags == FLAG_COMPRESSED:
+                    return zlib.decompress(value)
                     
                 return value
                 
@@ -241,15 +260,20 @@ class PyCask:
                     if key in valid_entries:
                         entry = valid_entries[key]
                         if entry[0] == file_id and entry[2] == value_pos:
+                            if flags == FLAG_COMPRESSED:
+                                value = zlib.decompress(value)
+                            
                             record_bytes, new_ts = self._encode_record(key, value, FLAG_NORMAL)
                             new_value_pos = compact_size + HEADER_SIZE + len(key)
                             compact_file.write(record_bytes)
                             compact_size += len(record_bytes)
                             
-                            hint_header = struct.pack(HINT_HEADER_FMT, new_ts, ksz, vsz, new_value_pos)
+                            new_vsz = len(record_bytes) - HEADER_SIZE - len(key)
+                            
+                            hint_header = struct.pack(HINT_HEADER_FMT, new_ts, ksz, new_vsz, new_value_pos)
                             hint_file.write(hint_header + key)
                             
-                            new_keydir_entries[key] = (compact_file_id, vsz, new_value_pos, new_ts, file_id, value_pos)
+                            new_keydir_entries[key] = (compact_file_id, new_vsz, new_value_pos, new_ts, file_id, value_pos)
                             
         compact_file.close()
         hint_file.close()

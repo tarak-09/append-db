@@ -61,7 +61,8 @@ def test_compaction(temp_dir):
         db.set(b"key_stable", b"stable_value")
         
         # Force a file rollover by writing a large key so that previous files can be compacted
-        db.set(b"key_large", b"l" * 300)
+        large_uncompressible = os.urandom(300)
+        db.set(b"key_large", large_uncompressible)
         
         # Current data files
         files_before = [f for f in os.listdir(temp_dir) if f.endswith('.data')]
@@ -72,7 +73,7 @@ def test_compaction(temp_dir):
         # Verify data is still intact
         assert db.get(b"key_changing") == b"value_9"
         assert db.get(b"key_stable") == b"stable_value"
-        assert db.get(b"key_large") == b"l" * 300
+        assert db.get(b"key_large") == large_uncompressible
 
 def test_type_errors(temp_dir):
     with PyCask(temp_dir) as db:
@@ -114,7 +115,7 @@ def test_hint_files(temp_dir):
     with PyCask(temp_dir, max_file_size=200) as db:
         db.set(b"key1", b"value1")
         db.set(b"key2", b"value2")
-        db.set(b"key_large", b"l" * 300)
+        db.set(b"key_large", os.urandom(300))
         
         db.compact()
         
@@ -126,3 +127,21 @@ def test_hint_files(temp_dir):
     with PyCask(temp_dir) as db:
         assert db.get(b"key1") == b"value1"
         assert db.get(b"key2") == b"value2"
+
+def test_compression(temp_dir):
+    with PyCask(temp_dir) as db:
+        compressible_value = b"a" * 1000
+        uncompressible_value = os.urandom(1000)
+        
+        db.set(b"comp", compressible_value)
+        db.set(b"uncomp", uncompressible_value)
+        
+        # Check sizes in keydir
+        comp_vsz = db.keydir[b"comp"][1]
+        uncomp_vsz = db.keydir[b"uncomp"][1]
+        
+        assert comp_vsz < 1000  # Should be compressed significantly
+        assert uncomp_vsz >= 1000 # Should not be compressed
+        
+        assert db.get(b"comp") == compressible_value
+        assert db.get(b"uncomp") == uncompressible_value
